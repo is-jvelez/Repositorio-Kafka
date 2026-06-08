@@ -1,0 +1,134 @@
+services:
+
+  # ── KAFKA KRaft ─────────────────────────────────────
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: kafka
+    ports:
+      - "9092:9092"        # para tus apps .NET dentro de Docker
+      - "9093:9093"        # para conectarte desde tu máquina host
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9094
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,EXTERNAL://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"   # ID fijo para KRaft
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      retries: 10
+      start_period: 30s
+
+  # ── KAFKA UI ────────────────────────────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "true"
+
+  # ── SQL SERVER ──────────────────────────────────────────────────────
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sqlserver
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${SA_PASSWORD}
+    ports:
+      - "${SQL_PORT}:1433"
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD", "/opt/mssql-tools18/bin/sqlcmd",
+             "-S", "localhost", "-U", "sa", "-P", "${SA_PASSWORD}",
+             "-Q", "SELECT 1", "-No"]
+      interval: 10s
+      retries: 10
+      start_period: 30s
+
+  sqlserver-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: sqlserver-init
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    environment:
+      MSSQL_SA_PASSWORD: ${SA_PASSWORD}
+    command: >
+      /bin/bash -c "
+      /opt/mssql-tools18/bin/sqlcmd -S sqlserver -U sa -P ${SA_PASSWORD} -No
+      -Q \"IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = '${DB_NAME}')
+           BEGIN CREATE DATABASE ${DB_NAME} END\"
+      "
+    restart: "no"
+
+  flyway:
+    image: flyway/flyway:10-alpine
+    container_name: flyway
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+      sqlserver-init:
+        condition: service_completed_successfully
+    environment:
+      FLYWAY_URL: "jdbc:sqlserver://sqlserver:1433;databaseName=${DB_NAME};encrypt=false;trustServerCertificate=true"
+      FLYWAY_USER: "sa"
+      FLYWAY_PASSWORD: ${SA_PASSWORD}
+    volumes:
+      - ./flyway/sql:/flyway/sql
+      - ./flyway/conf:/flyway/conf
+    command: migrate
+  
+  # ── AUTH SERVICE ────────────────────────────────────────────────────
+  auth-api:
+    build:
+      context: ./NET/is-auth-service/AuthService
+      dockerfile: Dockerfile
+    container_name: auth-api
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+      sqlserver-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+    ports:
+      - "${API_PORT}:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Docker
+      ConnectionStrings__DefaultConnection: >
+        Server=sqlserver; Database=${DB_NAME}; User Id=sa; Password=${SA_PASSWORD}; TrustServerCertificate=True; Encrypt=False;
+      JwtSettings__Secret: ${JWT_SECRET}
+      Kafka__BootstrapServers: kafka:9092
+      Kafka__Topic: user-registered
+
+  # ── NOTIFICATION WORKER ─────────────────────────────────────────────
+  notification-worker:
+    build:
+      context: ./NET/is-notification-worker/NotificationWorker
+      dockerfile: Dockerfile
+    container_name: notification-worker
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      Kafka__BootstrapServers: kafka:9092
+      Kafka__Topic: user-registered
+
+volumes:
+  sqlserver_data:
+  kafka_data:

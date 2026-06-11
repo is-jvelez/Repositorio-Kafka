@@ -48,6 +48,7 @@ services:
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: ${SA_PASSWORD}
+      MSSQL_MEMORY_LIMIT_MB: ${MSSQL_MEMORY_LIMIT_MB:-2048}
     ports:
       - "${SQL_PORT}:1433"
     volumes:

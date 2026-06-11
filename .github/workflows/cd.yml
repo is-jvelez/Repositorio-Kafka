@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - develop
 
 jobs:
 
@@ -23,9 +24,49 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      # ── Determinar tags según rama ──────────────────────────────────
+      - name: Set environment tag
+        id: env_tag
+        run: |
+          SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "TAG=latest"            >> $GITHUB_OUTPUT
+            echo "TAG_SHA=latest-$SHA"   >> $GITHUB_OUTPUT
+          else
+            echo "TAG=dev"               >> $GITHUB_OUTPUT
+            echo "TAG_SHA=dev-$SHA"      >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push auth-api
         uses: docker/build-push-action@v5
         with:
           context: ./NET/is-auth-service/AuthService
+          dockerfile: ./NET/is-auth-service/AuthService/Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/auth-api:latest
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/auth-api:${{ steps.env_tag.outputs.TAG }}
+            ghcr.io/${{ github.repository_owner }}/auth-api:${{ steps.env_tag.outputs.TAG_SHA }}
+
+      # ── Notification Worker ─────────────────────────────────────────
+      - name: Build and push notification-worker
+        uses: docker/build-push-action@v5
+        with:
+          context: ./NET/is-notification-worker/NotificationWorker
+          dockerfile: ./NET/is-notification-worker/NotificationWorker/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/notification-worker:${{ steps.env_tag.outputs.TAG }}
+            ghcr.io/${{ github.repository_owner }}/notification-worker:${{ steps.env_tag.outputs.TAG_SHA }}
+
+      # ── Resumen ─────────────────────────────────────────────────────
+      - name: Summary
+        run: |
+          echo "## 🐳 Imágenes publicadas" >> $GITHUB_STEP_SUMMARY
+          echo "| Imagen | Tags |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| auth-api | \`${{ steps.env_tag.outputs.TAG }}\` \`${{ steps.env_tag.outputs.TAG_SHA }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| notification-worker | \`${{ steps.env_tag.outputs.TAG }}\` \`${{ steps.env_tag.outputs.TAG_SHA }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Rama** | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Author** | \`${{ github.actor }}\` |" >> $GITHUB_STEP_SUMMARY
+

@@ -4,10 +4,11 @@ on:
   push:
     branches:
       - main
+      - develop
 
 jobs:
 
-  publish-image:
+  publish-images:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -23,9 +24,119 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      # ── Determinar tags según rama ──────────────────────────────────
+      - name: Set environment tag
+        id: env_tag
+        run: |
+          SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "TAG=latest"            >> $GITHUB_OUTPUT
+            echo "TAG_SHA=latest-$SHA"   >> $GITHUB_OUTPUT
+          else
+            echo "TAG=dev"               >> $GITHUB_OUTPUT
+            echo "TAG_SHA=dev-$SHA"      >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push auth-api
         uses: docker/build-push-action@v5
         with:
           context: ./NET/is-auth-service/AuthService
+          dockerfile: ./NET/is-auth-service/AuthService/Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/auth-api:latest
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/auth-api:${{ steps.env_tag.outputs.TAG }}
+            ghcr.io/${{ github.repository_owner }}/auth-api:${{ steps.env_tag.outputs.TAG_SHA }}
+
+      # ── Notification Worker ─────────────────────────────────────────
+      - name: Build and push notification-worker
+        uses: docker/build-push-action@v5
+        with:
+          context: ./NET/is-notification-worker/NotificationWorker
+          dockerfile: ./NET/is-notification-worker/NotificationWorker/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/notification-worker:${{ steps.env_tag.outputs.TAG }}
+            ghcr.io/${{ github.repository_owner }}/notification-worker:${{ steps.env_tag.outputs.TAG_SHA }}
+
+      # ── Resumen ─────────────────────────────────────────────────────
+      - name: Summary
+        run: |
+          echo "## 🐳 Imágenes publicadas" >> $GITHUB_STEP_SUMMARY
+          echo "| Imagen | Tags |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| auth-api | \`${{ steps.env_tag.outputs.TAG }}\` \`${{ steps.env_tag.outputs.TAG_SHA }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| notification-worker | \`${{ steps.env_tag.outputs.TAG }}\` \`${{ steps.env_tag.outputs.TAG_SHA }}\` |" >> $GITHUB_STEP_SUMMARY
+
+  deploy:
+    runs-on: self-hosted
+    needs: publish-images
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set deploy tag
+        id: deploy_tag
+        shell: powershell
+        run: |
+          if ("${{ github.ref_name }}" -eq "main") {
+            echo "TAG=latest" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "TAG=dev" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Create .env
+        shell: powershell
+        run: |
+          $envContent = @"
+          SA_PASSWORD=${{ secrets.SA_PASSWORD }}
+          DB_NAME=${{ secrets.DB_NAME }}
+          JWT_SECRET=${{ secrets.JWT_SECRET }}
+          API_PORT=5000
+          SQL_PORT=1433
+          "@
+          $envContent.Trim() | Set-Content -Path .env -Encoding UTF8
+
+      - name: Log in to GHCR
+        shell: powershell
+        run: |
+          echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Deploy with docker compose
+        shell: powershell
+        run: |
+          docker compose pull auth-api notification-worker
+          docker compose up -d --build
+          Write-Host "✅ Deploy completado en rama ${{ github.ref_name }}"
+
+      - name: Smoke test
+        shell: powershell
+        run: |
+          $maxRetries = 15
+          $retry = 0
+          do {
+            try {
+              $response = Invoke-WebRequest -Uri "http://localhost:5000/scalar/v1" -UseBasicParsing -ErrorAction Stop
+              Write-Host "✅ API respondiendo correctamente"
+              exit 0
+            } catch {
+              $retry++
+              Write-Host "Esperando API... intento $retry/$maxRetries"
+              Start-Sleep -Seconds 5
+            }
+          } while ($retry -lt $maxRetries)
+          Write-Host "❌ API no respondió después de $maxRetries intentos"
+          exit 1
+
+      - name: Deploy summary
+        shell: powershell
+        run: |
+          echo "## 🚀 Deploy completado" >> $env:GITHUB_STEP_SUMMARY
+          echo "| Campo | Valor |" >> $env:GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $env:GITHUB_STEP_SUMMARY
+          echo "| Rama | ``${{ github.ref_name }}`` |" >> $env:GITHUB_STEP_SUMMARY
+          echo "| Tag | ``${{ steps.deploy_tag.outputs.TAG }}`` |" >> $env:GITHUB_STEP_SUMMARY
+          echo "| Commit | ``${{ github.sha }}`` |" >> $env:GITHUB_STEP_SUMMARY
+          echo "| API | http://localhost:5000/scalar/v1 |" >> $env:GITHUB_STEP_SUMMARY

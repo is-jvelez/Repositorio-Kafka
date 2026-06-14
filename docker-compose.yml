@@ -96,6 +96,7 @@ services:
   
   # ── AUTH SERVICE ────────────────────────────────────────────────────
   auth-api:
+    image: ${AUTH_API_IMAGE:-repositorio-kafka-auth-api}
     build:
       context: ./NET/is-auth-service/AuthService
       dockerfile: Dockerfile
@@ -119,6 +120,7 @@ services:
 
   # ── NOTIFICATION WORKER ─────────────────────────────────────────────
   notification-worker:
+    image: ${WORKER_IMAGE:-repositorio-kafka-notification-worker}
     build:
       context: ./NET/is-notification-worker/NotificationWorker
       dockerfile: Dockerfile
